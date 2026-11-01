@@ -5,8 +5,7 @@
 ```
 woori-library/                      ← 모노레포 루트
 ├── frontend/    (React + TS + Vite)
-├── backend/     (Spring Boot 3.x)
-└── crawler/     (Playwright-Java, backend에 모듈로 포함 가능)
+└── backend/     (Spring Boot 4.x, Playwright-Java 크롤러는 service/crawler 패키지에 포함)
 
 [React SPA] ──HTTPS/JSON──▶ [Spring Boot API] ──JDBC──▶ [PostgreSQL]
       ▲                            │
@@ -18,7 +17,7 @@ woori-library/                      ← 모노레포 루트
 
 | 영역 | 스택 | 비고 |
 |---|---|---|
-| Frontend | React 18 + TypeScript 5 + Vite 5 | 디자인 토큰은 화면별 문서 참고, CSS 변수로 이식 |
+| Frontend | React 19 + TypeScript 6 + Vite 8 | 디자인 토큰은 화면별 문서 참고, CSS 변수로 이식 |
 | 상태관리 | React 내장 (useState/useReducer) | 화면 6개 규모라 Redux 등 불필요 |
 | 라우팅 | react-router-dom | 로그인/메인/가족등록/알림설정/일반예약현황/상호대차현황 6-route |
 | Backend | Spring Boot 4.x (Java 21) | Web, Validation, Data JPA, Security(OAuth2 Client). Jackson 3(`tools.jackson.*` 패키지 — `com.fasterxml.jackson` 아님, 새 서비스에서 Jackson 타입 임포트할 때 주의 |
@@ -139,9 +138,9 @@ CREATE TABLE reservation_record (
   UNIQUE (library_account_id, book_title, reserved_at)
 );
 
--- 상호대차현황 신청현황(issl.go.kr mutualLoanList.do, type=0 기본값). 이력현황(type=1) 탭은
--- 스크래핑 범위 밖. "대출중"이 실제로 "대출 가능해진 시점"인지 "이미 대출 완료된 시점"인지도
--- 미확인(docs/issl-site-notes.md 참고).
+-- 상호대차현황 신청현황(issl.go.kr mutualLoanList.do, type=0 기본값). 이력현황(type=1)은
+-- 아래 mutual_loan_history_record에 별도 저장. 수령 가능 시점의 상태 텍스트는 "대출가능"으로
+-- 확정(실사용 확인, ReadyStatusMatcher 참고) — "대출중"이 아님.
 CREATE TABLE mutual_loan_record (
   id                 BIGSERIAL PRIMARY KEY,
   library_account_id BIGINT NOT NULL REFERENCES library_account(id) ON DELETE CASCADE,
@@ -149,7 +148,7 @@ CREATE TABLE mutual_loan_record (
   applied_at         DATE NOT NULL,                -- 신청일
   branch_name        VARCHAR(20) NOT NULL,         -- 소장도서관
   pickup_branch_name VARCHAR(20) NOT NULL,         -- 수령처
-  status_text        VARCHAR(50) NOT NULL,         -- 원문 상태 텍스트 (확인된 값: "대출중")
+  status_text        VARCHAR(50) NOT NULL,         -- 원문 상태 텍스트 (수령 가능 시 "대출가능")
   ready_notified_at  TIMESTAMP,                    -- 대출가능 알림을 이미 보냈으면 시각 기록(중복 발송 방지)
   fetched_at         TIMESTAMP NOT NULL DEFAULT now(),
   UNIQUE (library_account_id, book_title, applied_at)
@@ -213,7 +212,7 @@ IsslReservationScrapeService.fetchReservations(context) -> List<ReservationRecor
 IsslMutualLoanScrapeService.fetchMutualLoans(context) -> List<MutualLoanRecordDto>
   - GET /mbr/mstd/mutualLoanList.do?mnidx=1551 (type 파라미터 없이 GET하면 기본값 type=0=신청현황이 내려옴)
   - table.tableType.tableType02 파싱 (td 7개: 번호/도서정보/신청일/소장도서관/수령처/상태/취소)
-  - "대출가능" 판정: 실계정에서 확인된 값은 "대출중" 하나뿐 — 우선 status_text == "대출중"을 기준으로 구현하되, 중간 상태가 추가로 발견되면 재조정
+  - "대출가능" 판정: status_text가 "대출가능"을 포함하면 수령 가능(실사용 확인으로 확정, ReadyStatusMatcher). "대출중"은 수령 가능 상태가 아님
 
 IsslMutualLoanScrapeService.fetchMutualLoanHistory(context) -> List<MutualLoanRecordDto>
   - 같은 페이지에서 페이지 자체 JS 함수 fn_typeTabMove(1) 호출 → hidden form이 type=1로 재제출됨
@@ -229,9 +228,11 @@ IsslMutualLoanScrapeService.fetchMutualLoanHistory(context) -> List<MutualLoanRe
 
 - 도서관 계정 비밀번호: `AesGcmCipherService` — AES-256-GCM, IV는 매번 랜덤 생성 후 ciphertext 앞에 prefix, 키는 `LIBRARY_PW_ENC_KEY` 환경변수(32byte, base64)로 주입. `.env`/`.gitignore` 처리, 저장소 커밋 금지.
 - 서비스 로그인은 OAuth2(Google/Naver)만 사용 — 자체 비밀번호 보관 없음.
-- 세션: Spring Security 세션 쿠키(`HttpOnly`, `Secure`, `SameSite=Lax`).
-- CSRF: `CookieCsrfTokenRepository.withHttpOnlyFalse()` — SPA가 `XSRF-TOKEN` 쿠키를 읽어 `X-XSRF-TOKEN` 헤더로 되돌려 보내는 표준 방식. 세션 쿠키 인증이라 CSRF를 끄지 않는다.
-- CORS: 개발 중에는 `http://localhost:5173`만 허용(`SecurityConfig.corsConfigurationSource`), 자격 증명 포함(`allowCredentials=true`).
+- 세션: Spring Security 세션 쿠키(`HttpOnly`). 배포 환경은 프론트(Vercel)와 백엔드(my-library.org)가 크로스도메인이라 `SESSION_COOKIE_SAME_SITE=none` + `SESSION_COOKIE_SECURE=true`, 로컬 기본값은 `lax`/`false`. 세션 저장소는 in-memory라 백엔드 재배포 시 전원 로그아웃된다.
+- CSRF: 비활성화(`csrf.disable()`). 쿠키 기반 더블서밋은 크로스도메인에서 프론트 JS가 `XSRF-TOKEN` 쿠키를 읽을 수 없어 구조적으로 성립하지 않는다. 대신 CORS를 프론트 origin 하나로 제한하고 `withCredentials` 필수로 묶어 대체한다.
+- CORS: 허용 origin은 `APP_FRONTEND_BASE_URL`(로컬 기본값 `http://localhost:5173`) 하나뿐(`SecurityConfig.corsConfigurationSource`), 자격 증명 포함(`allowCredentials=true`).
+- 미인증 API 요청은 로그인 페이지 302 리다이렉트 대신 순수 401만 반환한다(`authenticationEntryPoint`) — 프론트가 CORS에 막혀 상태 코드를 못 읽는 문제 방지.
+- `server.forward-headers-strategy: framework` — Cloudflare Tunnel 뒤에서 OAuth2 `{baseUrl}`이 내부 주소로 만들어지는 것을 방지.
 - google/naver는 사용자 정보 응답 구조가 서로 달라 `CustomOAuth2UserService`가 provider별로 `provider_user_id`/`name`을 정규화한다. 최초 로그인 시 `app_user` + 본인 `family_member`(`is_self=true`) + 기본 `notification_setting`을 함께 생성한다.
 
 ## 8. 환경변수 (`.env` 예시)
