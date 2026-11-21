@@ -6,7 +6,8 @@ import { BellIcon, ChevronLeftIcon, ChevronRightIcon, MenuIcon, RefreshIcon } fr
 import { LoanCard, UrgentLoanCard } from '../components/LoanCard';
 import { EmptyState } from '../components/EmptyState';
 import { LIBRARY_CODES, type LibraryCode, type LoanRecord, type SortDir, type SortKey } from '../types';
-import { getLoans, syncLoans } from '../api/loans';
+import { getLoans } from '../api/loans';
+import { resetSyncSession, runSync, syncSession } from '../api/syncSession';
 import { getReservations } from '../api/reservations';
 import { getMutualLoans } from '../api/mutualLoans';
 import { listMembers } from '../api/members';
@@ -26,9 +27,11 @@ const DUE_TIMING_THRESHOLD: Record<NotificationSettingResponse['dueAlertTiming']
   d1: 1,
   d0: 0,
 };
-// 접속해 있는 동안 준실시간 갱신 주기 — issl.go.kr에 매번 실제 브라우저로 로그인해서 긁어오는 방식이라
-// 너무 짧게 잡으면 도서관 사이트에 부담(+ 계정 잠금 위험)을 줄 수 있어 5분으로 둔다.
-const AUTO_SYNC_INTERVAL_MS = 5 * 60 * 1000;
+// 접속해 있는 동안 자동 갱신 주기 — issl.go.kr에 매번 실제 브라우저로 로그인해서 긁어오는 방식이라
+// 너무 짧게 잡으면 도서관 사이트에 부담(+ 계정 잠금 위험)을 준다. 대출 정보는 자주 안 바뀌고 즉시 조회는
+// 새로고침 버튼으로 할 수 있어서, 사용자 결정으로 5분 → 30분으로 늘림(2026-11-22). 대시보드 재진입 시에도
+// 마지막 동기화가 이 시간 안이면 다시 조회하지 않는다.
+const AUTO_SYNC_INTERVAL_MS = 30 * 60 * 1000;
 
 function toLoanRecord(loan: LoanResponse, index: number): LoanRecord {
   return {
@@ -55,9 +58,10 @@ export function DashboardPage() {
   const [sort, setSort] = useState<SortKey>('due');
   const [sortDir, setSortDir] = useState<SortDir>('asc');
   const [syncing, setSyncing] = useState(false);
-  const [lastSynced, setLastSynced] = useState<string | null>(null);
+  // 아래 두 값은 화면 이동 후 돌아와도 유지되도록 syncSession(모듈 단위)에서 초기값을 가져온다.
+  const [lastSynced, setLastSynced] = useState<string | null>(syncSession.lastSyncedLabel);
   // 마지막 동기화에서 실패한 계정들(상단 경고 배너). ✕로 닫거나 새로고침을 시작하면 비우고, 새 결과로 다시 채운다.
-  const [syncFailures, setSyncFailures] = useState<SyncFailure[]>([]);
+  const [syncFailures, setSyncFailures] = useState<SyncFailure[]>(syncSession.failures);
   const [loans, setLoans] = useState<LoanRecord[]>([]);
   const [reservations, setReservations] = useState<ReservationResponse[]>([]);
   const [mutualLoans, setMutualLoans] = useState<MutualLoanResponse[]>([]);
@@ -68,7 +72,7 @@ export function DashboardPage() {
   const urgentRef = useRef<HTMLDivElement>(null);
   const scrollUrgent = (dir: number) => urgentRef.current?.scrollBy({ left: dir * 140, behavior: 'smooth' });
   const syncingRef = useRef(false);
-  // 다음 자동 갱신 예약. 고정 주기(setInterval)가 아니라 "마지막 갱신이 끝난 시점부터 5분"으로 매번 다시 잡는다 —
+  // 다음 자동 갱신 예약. 고정 주기(setInterval)가 아니라 "마지막 갱신이 끝난 시점부터 주기만큼"으로 매번 다시 잡는다 —
   // 직접 새로고침한 직후에 주기 타이머가 또 돌아 issl.go.kr에 연달아 로그인하는 일을 막기 위함.
   const autoSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const unmountedRef = useRef(false);
@@ -89,29 +93,32 @@ export function DashboardPage() {
     getNotificationSettings().then(setNotifSettings);
   }, []);
 
-  const scheduleAutoSync = () => {
+  const scheduleAutoSync = (delayMs: number = AUTO_SYNC_INTERVAL_MS) => {
     if (autoSyncTimerRef.current) clearTimeout(autoSyncTimerRef.current);
     if (unmountedRef.current) return;
-    autoSyncTimerRef.current = setTimeout(refresh, AUTO_SYNC_INTERVAL_MS);
+    autoSyncTimerRef.current = setTimeout(() => {
+      // 탭이 백그라운드거나 앱이 가려져 있으면 아무도 안 보는 화면을 위해 issl.go.kr에 로그인하지 않는다.
+      // 다시 화면에 나타날 때 visibilitychange 핸들러가 주기가 지났는지 보고 갱신한다.
+      if (document.visibilityState === 'hidden') return;
+      refresh();
+    }, delayMs);
   };
 
   const refresh = () => {
     if (syncingRef.current) return;
     syncingRef.current = true;
     setSyncing(true);
-    // 진행 중에는 자동 갱신이 끼어들지 않게 예약을 취소하고, 끝난 뒤 다시 5분 뒤로 잡는다.
+    // 진행 중에는 자동 갱신이 끼어들지 않게 예약을 취소하고, 끝난 뒤 다시 주기만큼 뒤로 잡는다.
     if (autoSyncTimerRef.current) clearTimeout(autoSyncTimerRef.current);
     setSyncFailures([]);
     const startedAt = Date.now();
-    syncLoans()
-      .then((result) => {
-        setSyncFailures(result.failures ?? []);
-        return Promise.all([loadLoans(), loadReservations(), loadMutualLoans()]);
-      })
+    // runSync는 이미 진행 중인 동기화(다른 화면에 갔다 오기 전에 시작된 것 등)가 있으면 그 결과를 같이 기다린다.
+    runSync()
+      .then(() => Promise.all([loadLoans(), loadReservations(), loadMutualLoans()]))
       .then(() => {
-        const now = new Date();
-        const pad = (n: number) => String(n).padStart(2, '0');
-        setLastSynced(`${pad(now.getMonth() + 1)}.${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`);
+        if (unmountedRef.current) return;
+        setSyncFailures(syncSession.failures);
+        setLastSynced(syncSession.lastSyncedLabel);
       })
       .finally(() => {
         scheduleAutoSync();
@@ -123,10 +130,30 @@ export function DashboardPage() {
       });
   };
 
+  const dismissSyncFailures = () => {
+    syncSession.failures = [];
+    setSyncFailures([]);
+  };
+
   useEffect(() => {
     unmountedRef.current = false;
-    refresh(); // 대시보드 진입(로그인 직후 포함) 시 최신 대출현황으로 자동 갱신 — 끝나면 5분 뒤 다음 갱신이 예약된다.
+    // 대시보드 진입(로그인 직후 포함) 시 자동 갱신 — 단, 다른 화면에 갔다 돌아온 경우처럼 마지막 동기화가 자동 갱신 주기 안이면
+    // 다시 issl.go.kr에 로그인하지 않고(DB 데이터는 위 effect에서 이미 불러옴) 남은 시간 뒤로 자동 갱신만 예약한다.
+    const syncIfStale = () => {
+      const sinceLast = syncSession.lastFinishedAt === null ? Infinity : Date.now() - syncSession.lastFinishedAt;
+      if (syncSession.inFlight || sinceLast >= AUTO_SYNC_INTERVAL_MS) {
+        refresh();
+      } else {
+        scheduleAutoSync(AUTO_SYNC_INTERVAL_MS - sinceLast);
+      }
+    };
+    syncIfStale();
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') syncIfStale();
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
     return () => {
+      document.removeEventListener('visibilitychange', onVisibilityChange);
       unmountedRef.current = true;
       if (autoSyncTimerRef.current) clearTimeout(autoSyncTimerRef.current);
     };
@@ -231,7 +258,7 @@ export function DashboardPage() {
         {syncFailures.length > 0 && (
           <SyncFailureBanner
             failures={syncFailures}
-            onClose={() => setSyncFailures([])}
+            onClose={dismissSyncFailures}
             onGoFamily={() => navigate('/family')}
           />
         )}
@@ -413,7 +440,10 @@ export function DashboardPage() {
                   else if (label === '상호대차현황') navigate('/mutual-loans');
                   else if (label === '가족 관리') navigate('/family');
                   else if (label === '알림 설정') navigate('/notifications');
-                  else logout().finally(() => navigate('/login'));
+                  else logout().finally(() => {
+                    resetSyncSession();
+                    navigate('/login');
+                  });
                 }}
               >
                 {label}
