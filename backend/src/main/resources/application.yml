@@ -64,6 +64,8 @@ app:
     issl:
       base-url: https://www.issl.go.kr
       user-agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+      # 서버 전체에서 동시에 크롤링하는 계정 수 상한(= 동시에 뜨는 Chromium 수). VM 메모리가 부족하면 낮출 것.
+      max-parallel: ${CRAWLER_MAX_PARALLEL:5}
   push:
     vapid:
       public-key: ${VAPID_PUBLIC_KEY:}

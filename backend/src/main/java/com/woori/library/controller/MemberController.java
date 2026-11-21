@@ -39,6 +39,13 @@ public class MemberController {
 
     private static final Logger log = LoggerFactory.getLogger(MemberController.class);
 
+    /**
+     * 사용자 1명이 등록할 수 있는 가족 구성원 수 상한(본인 카드 포함). 새로고침 한 번에 구성원 수만큼 issl.go.kr
+     * 자동 로그인이 동시에 일어나므로, 사이트/서버 부하를 제한하기 위해 둔다. 프론트(FamilyMembersPage의
+     * MAX_MEMBERS)도 같은 값을 쓴다 — 바꿀 땐 둘 다 바꿀 것.
+     */
+    static final int MAX_MEMBERS = 5;
+
     private final FamilyMemberRepository familyMemberRepository;
     private final LibraryAccountRepository libraryAccountRepository;
     private final AesGcmCipherService cipherService;
@@ -65,6 +72,10 @@ public class MemberController {
     @PostMapping("/members")
     public MemberResponse addMember(
         @AuthenticationPrincipal AppOAuth2User principal, @Valid @RequestBody CreateMemberRequest request) {
+        if (familyMemberRepository.countByOwnerUserId(principal.getAppUserId()) >= MAX_MEMBERS) {
+            throw new ResponseStatusException(
+                HttpStatus.BAD_REQUEST, "가족 구성원은 본인 포함 최대 " + MAX_MEMBERS + "명까지 등록할 수 있습니다.");
+        }
         FamilyMember member = familyMemberRepository.save(new FamilyMember(principal.getAppUserId(), request.name(), false));
         return toResponse(member);
     }

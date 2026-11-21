@@ -29,9 +29,19 @@ export interface LoanResponse {
   overdue: boolean;
 }
 
+export interface SyncFailure {
+  memberName: string;
+  loginId: string;
+  /** 도서관이 아이디/비밀번호를 거부함 — 가족 관리에서 수정 필요. false면 사이트 지연 등 일시적 오류 */
+  credentialsRejected: boolean;
+  /** 마지막 동기화 성공 시각(ISO). 한 번도 성공 못 했으면 null */
+  lastSyncedAt: string | null;
+}
+
 export interface SyncResponse {
   synced: number;
   failed: string[];
+  failures: SyncFailure[];
 }
 
 export interface ReservationResponse {

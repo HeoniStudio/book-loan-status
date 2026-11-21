@@ -60,9 +60,13 @@ public class IsslLoginService {
         try {
             // 배포 컨테이너는 root로 실행돼 기본 샌드박스로 Chromium이 못 뜬다(--no-sandbox 필요).
             // --disable-dev-shm-usage: 컨테이너 기본 /dev/shm 용량 제한(보통 64MB)으로 인한 크래시 방지.
+            // --blink-settings=imagesEnabled=false: 우리는 텍스트(표)만 읽으므로 이미지(메인페이지 배너 등)를 아예
+            //   안 받는다 — 페이지 로딩 시간과 메모리를 줄여 계정 여러 개를 병렬로 돌릴 때 특히 효과가 크다. context.route()로
+            //   막는 방식은 Java 바인딩에선 Playwright 호출 중일 때만 핸들러가 돌아서(로그인 폴링의 sleep 동안 요청이 멈춤)
+            //   쓰지 않고, 브라우저 자체 설정으로 끈다.
             browser = playwright.chromium().launch(new BrowserType.LaunchOptions()
                 .setHeadless(true)
-                .setArgs(List.of("--no-sandbox", "--disable-dev-shm-usage")));
+                .setArgs(List.of("--no-sandbox", "--disable-dev-shm-usage", "--blink-settings=imagesEnabled=false")));
             BrowserContext context = browser.newContext(new Browser.NewContextOptions().setUserAgent(userAgent));
             Page page = context.newPage();
             // navigate/click 자체의 안전망 타임아웃 — 판정은 아래 폴링 루프가 별도로 처리한다.
@@ -128,7 +132,9 @@ public class IsslLoginService {
                         lastClickAttempt[0] = now;
                         log.info("[issl-debug] #loginBtn 클릭 시도 (+{}ms)", now - t0);
                         try {
-                            page.click("#loginBtn");
+                            // 짧은 타임아웃: 로그인이 이미 성공해 다른 페이지로 넘어간 뒤라면 #loginBtn이 없어서
+                            // 기본 타임아웃(30초)만큼 멈춰버린다(2026-11-22 실측, 로그인 후 30초 지연의 원인).
+                            page.click("#loginBtn", new Page.ClickOptions().setTimeout(2000));
                         } catch (RuntimeException e) {
                             log.info("[issl-debug] 클릭 재시도 중 예외(무시): {}", e.getMessage());
                         }
@@ -139,7 +145,8 @@ public class IsslLoginService {
                     }
                     return false;
                 },
-                LOGIN_TIMEOUT_MS);
+                LOGIN_TIMEOUT_MS,
+                page);
 
             log.info(
                 "[issl-debug] 폴링 종료 (+{}ms) url={} failureMessage={}",
@@ -148,7 +155,7 @@ public class IsslLoginService {
                 failureMessage.get());
 
             if (failureMessage.get() != null) {
-                throw new IsslAuthException("로그인 실패: " + failureMessage.get());
+                throw new IsslAuthException("로그인 실패: " + failureMessage.get(), true);
             }
             if (page.url().contains("loginView.do")) {
                 logPageSnapshot(page, t0);
@@ -194,15 +201,15 @@ public class IsslLoginService {
         }
     }
 
-    private void waitUntil(BooleanSupplier condition, int timeoutMs) {
+    /**
+     * Thread.sleep 대신 page.waitForTimeout으로 기다린다 — Playwright Java는 Playwright API를 호출하는 동안에만
+     * 브라우저 이벤트(페이지 이동, dialog, 응답)를 처리하므로, sleep으로 기다리면 page.url()이 갱신되지 않아 로그인이
+     * 이미 끝났는데도 다음 클릭 시도 때까지 알아채지 못한다.
+     */
+    private void waitUntil(BooleanSupplier condition, int timeoutMs, Page page) {
         long deadline = System.currentTimeMillis() + timeoutMs;
         while (!condition.getAsBoolean() && System.currentTimeMillis() < deadline) {
-            try {
-                Thread.sleep(100);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return;
-            }
+            page.waitForTimeout(100);
         }
     }
 }

@@ -19,6 +19,9 @@ interface EditDraft {
   password: string;
 }
 
+// 백엔드 MemberController.MAX_MEMBERS와 같은 값 — 새로고침 시 구성원 수만큼 도서관 자동 로그인이 동시에 돌아서 상한을 둔다.
+const MAX_MEMBERS = 5;
+
 const emptyDraft = (m: MemberResponse): EditDraft => ({
   name: m.name,
   loginId: m.libraryAccounts[0]?.loginId ?? '',
@@ -33,6 +36,7 @@ export function FamilyMembersPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showPassword, setShowPassword] = useState(false);
+  const isFull = members.length >= MAX_MEMBERS;
 
   useEffect(() => {
     listMembers().then(setMembers);
@@ -106,8 +110,9 @@ export function FamilyMembersPage() {
       const created = await createMember({ name: '새 구성원' });
       setMembers((prev) => [...prev, created]);
       startEdit(created);
-    } catch {
-      setError('구성원 추가에 실패했습니다. 잠시 후 다시 시도해주세요.');
+    } catch (e) {
+      const message = axios.isAxiosError(e) ? e.response?.data?.message : undefined;
+      setError(message ?? '구성원 추가에 실패했습니다. 잠시 후 다시 시도해주세요.');
     }
   };
 
@@ -122,6 +127,18 @@ export function FamilyMembersPage() {
         }
       />
       <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div
+          style={{
+            padding: '10px 14px',
+            borderRadius: 'var(--radius-md)',
+            background: 'var(--color-primary-50)',
+            color: 'var(--color-primary-700)',
+            fontSize: 'var(--font-size-sm)',
+            textAlign: 'center',
+          }}
+        >
+          가족은 최대 {MAX_MEMBERS}명까지 입력됩니다. ({members.length}/{MAX_MEMBERS})
+        </div>
         {members.map((m) => {
           const isEditing = editing === m.id;
           const disabled = editing !== null && editing !== m.id;
@@ -231,6 +248,8 @@ export function FamilyMembersPage() {
           );
         })}
         <div
+          role="button"
+          aria-disabled={isFull}
           style={{
             border: '1px dashed var(--color-neutral-400)',
             borderRadius: 'var(--radius-md)',
@@ -238,9 +257,10 @@ export function FamilyMembersPage() {
             textAlign: 'center',
             fontSize: 'var(--font-size-sm)',
             color: 'var(--color-neutral-600)',
-            cursor: 'pointer',
+            cursor: isFull ? 'not-allowed' : 'pointer',
+            opacity: isFull ? 0.4 : 1,
           }}
-          onClick={addMember}
+          onClick={isFull ? undefined : addMember}
         >
           ＋ 가족 구성원 추가
         </div>

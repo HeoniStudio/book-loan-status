@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { AppBar } from '../components/AppBar';
+import { SyncFailureBanner } from '../components/SyncFailureBanner';
 import { BellIcon, ChevronLeftIcon, ChevronRightIcon, MenuIcon, RefreshIcon } from '../components/icons';
 import { LoanCard, UrgentLoanCard } from '../components/LoanCard';
 import { EmptyState } from '../components/EmptyState';
@@ -11,7 +12,7 @@ import { getMutualLoans } from '../api/mutualLoans';
 import { listMembers } from '../api/members';
 import { logout } from '../api/auth';
 import { getNotificationSettings } from '../api/notificationSettings';
-import type { LoanResponse, MutualLoanResponse, NotificationSettingResponse, ReservationResponse } from '../api/types';
+import type { LoanResponse, MutualLoanResponse, NotificationSettingResponse, ReservationResponse, SyncFailure } from '../api/types';
 
 type NotifItem =
   | { kind: 'loan'; id: string; title: string; dday: number; dueDate: string; library: string; memberName: string }
@@ -55,6 +56,8 @@ export function DashboardPage() {
   const [sortDir, setSortDir] = useState<SortDir>('asc');
   const [syncing, setSyncing] = useState(false);
   const [lastSynced, setLastSynced] = useState<string | null>(null);
+  // 마지막 동기화에서 실패한 계정들(상단 경고 배너). ✕로 닫거나 새로고침을 시작하면 비우고, 새 결과로 다시 채운다.
+  const [syncFailures, setSyncFailures] = useState<SyncFailure[]>([]);
   const [loans, setLoans] = useState<LoanRecord[]>([]);
   const [reservations, setReservations] = useState<ReservationResponse[]>([]);
   const [mutualLoans, setMutualLoans] = useState<MutualLoanResponse[]>([]);
@@ -65,6 +68,10 @@ export function DashboardPage() {
   const urgentRef = useRef<HTMLDivElement>(null);
   const scrollUrgent = (dir: number) => urgentRef.current?.scrollBy({ left: dir * 140, behavior: 'smooth' });
   const syncingRef = useRef(false);
+  // 다음 자동 갱신 예약. 고정 주기(setInterval)가 아니라 "마지막 갱신이 끝난 시점부터 5분"으로 매번 다시 잡는다 —
+  // 직접 새로고침한 직후에 주기 타이머가 또 돌아 issl.go.kr에 연달아 로그인하는 일을 막기 위함.
+  const autoSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const unmountedRef = useRef(false);
 
   const loadLoans = () => getLoans().then((data) => setLoans(data.map(toLoanRecord)));
   const loadReservations = () => getReservations().then(setReservations);
@@ -82,19 +89,32 @@ export function DashboardPage() {
     getNotificationSettings().then(setNotifSettings);
   }, []);
 
+  const scheduleAutoSync = () => {
+    if (autoSyncTimerRef.current) clearTimeout(autoSyncTimerRef.current);
+    if (unmountedRef.current) return;
+    autoSyncTimerRef.current = setTimeout(refresh, AUTO_SYNC_INTERVAL_MS);
+  };
+
   const refresh = () => {
     if (syncingRef.current) return;
     syncingRef.current = true;
     setSyncing(true);
+    // 진행 중에는 자동 갱신이 끼어들지 않게 예약을 취소하고, 끝난 뒤 다시 5분 뒤로 잡는다.
+    if (autoSyncTimerRef.current) clearTimeout(autoSyncTimerRef.current);
+    setSyncFailures([]);
     const startedAt = Date.now();
     syncLoans()
-      .then(() => Promise.all([loadLoans(), loadReservations(), loadMutualLoans()]))
+      .then((result) => {
+        setSyncFailures(result.failures ?? []);
+        return Promise.all([loadLoans(), loadReservations(), loadMutualLoans()]);
+      })
       .then(() => {
         const now = new Date();
         const pad = (n: number) => String(n).padStart(2, '0');
         setLastSynced(`${pad(now.getMonth() + 1)}.${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`);
       })
       .finally(() => {
+        scheduleAutoSync();
         const elapsed = Date.now() - startedAt;
         setTimeout(() => {
           syncingRef.current = false;
@@ -104,9 +124,12 @@ export function DashboardPage() {
   };
 
   useEffect(() => {
-    refresh(); // 대시보드 진입(로그인 직후 포함) 시 최신 대출현황으로 자동 갱신
-    const interval = setInterval(refresh, AUTO_SYNC_INTERVAL_MS);
-    return () => clearInterval(interval);
+    unmountedRef.current = false;
+    refresh(); // 대시보드 진입(로그인 직후 포함) 시 최신 대출현황으로 자동 갱신 — 끝나면 5분 뒤 다음 갱신이 예약된다.
+    return () => {
+      unmountedRef.current = true;
+      if (autoSyncTimerRef.current) clearTimeout(autoSyncTimerRef.current);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -205,6 +228,13 @@ export function DashboardPage() {
       />
 
       <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
+        {syncFailures.length > 0 && (
+          <SyncFailureBanner
+            failures={syncFailures}
+            onClose={() => setSyncFailures([])}
+            onGoFamily={() => navigate('/family')}
+          />
+        )}
         {loans.length > 0 && (
           <div style={{ padding: '16px 20px 12px', borderBottom: '1px solid var(--color-border)' }}>
             <div style={{ fontSize: 'var(--font-size-xs)', fontWeight: 'var(--font-weight-bold)', color: 'var(--color-accent-red)', marginBottom: 10 }}>

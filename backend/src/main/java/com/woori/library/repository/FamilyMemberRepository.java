@@ -6,4 +6,6 @@ import org.springframework.data.jpa.repository.JpaRepository;
 
 public interface FamilyMemberRepository extends JpaRepository<FamilyMember, Long> {
     List<FamilyMember> findByOwnerUserId(Long ownerUserId);
+
+    long countByOwnerUserId(Long ownerUserId);
 }

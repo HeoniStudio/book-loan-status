@@ -7,6 +7,8 @@ import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -26,6 +28,8 @@ import org.springframework.stereotype.Service;
  */
 @Service
 public class IsslMutualLoanScrapeService {
+
+    private static final Logger log = LoggerFactory.getLogger(IsslMutualLoanScrapeService.class);
 
     private static final String MUTUAL_LOAN_LIST_PATH = "/mbr/mstd/mutualLoanList.do?mnidx=1551";
     private static final String ROW_SELECTOR = "table.tableType.tableType02 tbody tr";
@@ -95,7 +99,14 @@ public class IsslMutualLoanScrapeService {
                 continue;
             }
             String bookTitle = normalizeText(cells.nth(1).textContent());
-            LocalDate appliedAt = parseDate(cells.nth(2).textContent());
+            LocalDate appliedAt = parseDateOrNull(cells.nth(2).textContent());
+            if (appliedAt == null) {
+                // 신청일이 "-" 등으로 비어있는 행이 실계정에서 확인됨(2026-11-22) — 이 행 하나 때문에 계정 전체
+                // 동기화가 실패하지 않도록 건너뛰고 기록만 남긴다(신청일은 자연키의 일부라 없으면 저장할 수 없다).
+                log.warn("상호대차 행 건너뜀: 신청일 파싱 불가 (원문=\"{}\", 도서명=\"{}\", 상태=\"{}\")",
+                    normalizeText(cells.nth(2).textContent()), bookTitle, normalizeText(cells.nth(5).textContent()));
+                continue;
+            }
             String branchName = normalizeText(cells.nth(3).textContent());
             String pickupBranchName = normalizeText(cells.nth(4).textContent());
             String statusText = normalizeText(cells.nth(5).textContent());
@@ -108,7 +119,11 @@ public class IsslMutualLoanScrapeService {
         return raw.replaceAll("[\\s\\u200B]+", " ").trim();
     }
 
-    private LocalDate parseDate(String raw) {
-        return LocalDate.parse(raw.replaceAll("[\\s\\u200B]+", ""), DATE_FMT);
+    private LocalDate parseDateOrNull(String raw) {
+        try {
+            return LocalDate.parse(raw.replaceAll("[\\s\\u200B]+", ""), DATE_FMT);
+        } catch (java.time.format.DateTimeParseException e) {
+            return null;
+        }
     }
 }
